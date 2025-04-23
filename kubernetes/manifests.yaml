@@ -1,0 +1,486 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: xpto-finance
+  labels:
+    name: xpto-finance
+    environment: production
+---
+# Configuração do Service Account para os serviços
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: xpto-service-account
+  namespace: xpto-finance
+---
+# ConfigMap para configurações dos serviços
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: xpto-config
+  namespace: xpto-finance
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "info"
+  METRICS_ENABLED: "true"
+  DB_HOST: "postgres-read.xpto.internal"
+  REDIS_HOST: "redis.xpto.internal"
+  API_TIMEOUT: "30"
+  MAX_CONNECTIONS: "100"
+---
+# Secret para credenciais de banco de dados e outros serviços
+apiVersion: v1
+kind: Secret
+metadata:
+  name: xpto-secrets
+  namespace: xpto-finance
+type: Opaque
+data:
+  # Valores codificados em base64 (em produção, usar ferramentas de gestão de segredos)
+  db_user: cG9zdGdyZXM=  # postgres
+  db_password: cGFzc3dvcmQ=  # password
+  redis_password: cmVkaXNwYXNz  # redispass
+  api_key: eHB0by1hcGkta2V5LTEyMzQ=  # xpto-api-key-1234
+---
+# Deployment para o Serviço de Lançamentos Financeiros
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lancamentos-service
+  namespace: xpto-finance
+  labels:
+    app: lancamentos-service
+    tier: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: lancamentos-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: lancamentos-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: xpto-service-account
+      containers:
+      - name: lancamentos-service
+        image: xpto/lancamentos-service:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        env:
+        - name: APP_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: APP_ENV
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: LOG_LEVEL
+        - name: METRICS_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: METRICS_ENABLED
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: DB_HOST
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: xpto-secrets
+              key: db_user
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: xpto-secrets
+              key: db_password
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: REDIS_HOST
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: xpto-secrets
+              key: redis_password
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+# Service para o Serviço de Lançamentos Financeiros
+apiVersion: v1
+kind: Service
+metadata:
+  name: lancamentos-service
+  namespace: xpto-finance
+  labels:
+    app: lancamentos-service
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+spec:
+  selector:
+    app: lancamentos-service
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http
+  type: ClusterIP
+---
+# Deployment para o Serviço de Consolidado Diário
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consolidado-service
+  namespace: xpto-finance
+  labels:
+    app: consolidado-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: consolidado-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: consolidado-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: xpto-service-account
+      containers:
+      - name: consolidado-service
+        image: xpto/consolidado-service:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "384Mi"
+          limits:
+            cpu: "1000m"
+            memory: "768Mi"
+        env:
+        - name: APP_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: APP_ENV
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: LOG_LEVEL
+        - name: METRICS_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: METRICS_ENABLED
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: DB_HOST
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: xpto-secrets
+              key: db_user
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: xpto-secrets
+              key: db_password
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: REDIS_HOST
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: xpto-secrets
+              key: redis_password
+        - name: API_TIMEOUT
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: API_TIMEOUT
+        - name: MAX_CONNECTIONS
+          valueFrom:
+            configMapKeyRef:
+              name: xpto-config
+              key: MAX_CONNECTIONS
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 45
+          periodSeconds: 30
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+# Service para o Serviço de Consolidado Diário
+apiVersion: v1
+kind: Service
+metadata:
+  name: consolidado-service
+  namespace: xpto-finance
+  labels:
+    app: consolidado-service
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+spec:
+  selector:
+    app: consolidado-service
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http
+  type: ClusterIP
+---
+# HorizontalPodAutoscaler para o Serviço de Lançamentos
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: lancamentos-hpa
+  namespace: xpto-finance
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: lancamentos-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+# HorizontalPodAutoscaler para o Serviço de Consolidado
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: consolidado-hpa
+  namespace: xpto-finance
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: consolidado-service
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+---
+# Ingress para expor os serviços
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: xpto-ingress
+  namespace: xpto-finance
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - api.xpto.com.br
+    secretName: xpto-tls
+  rules:
+  - host: api.xpto.com.br
+    http:
+      paths:
+      - path: /lancamentos(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: lancamentos-service
+            port:
+              number: 80
+      - path: /consolidado(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: consolidado-service
+            port:
+              number: 80
+---
+# PodDisruptionBudget para garantir disponibilidade durante manutenções
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: lancamentos-pdb
+  namespace: xpto-finance
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: lancamentos-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: consolidado-pdb
+  namespace: xpto-finance
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: consolidado-service
+---
+# NetworkPolicy para restringir tráfego
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: xpto-network-policy
+  namespace: xpto-finance
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  - from:
+    - podSelector:
+        matchLabels:
+          tier: backend
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 169.254.0.0/16
+        - 172.16.0.0/12
+    ports:
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 443
