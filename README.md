@@ -59,3 +59,4 @@ Para implementar esta solução, siga os passos abaixo:
 7. Realize testes de carga e recuperação de desastres
 
 Para mais detalhes sobre cada componente da solução, consulte a documentação na pasta `docs/`.
+# desafio-arquitetura-infra
