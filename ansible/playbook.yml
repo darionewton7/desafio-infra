@@ -1,6 +1,6 @@
 ---
 # Playbook Ansible para configuração do ambiente híbrido XPTO Finance
-# Autor: Manus AI
+# Autor: Dário Newton
 # Data: Abril 2025
 
 - name: Configuração do ambiente on-premises
