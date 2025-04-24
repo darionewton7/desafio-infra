@@ -1,5 +1,5 @@
 # Terraform para provisionamento da infraestrutura híbrida XPTO Finance
-# Autor: Manus AI
+# Autor: Dário Newton
 # Data: Abril 2025
 
 # Configuração do provedor AWS (exemplo com custo zero usando localstack)
