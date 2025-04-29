@@ -95,4 +95,4 @@ Para mais detalhes sobre cada componente da solução, consulte a documentação
 
 ---
 
-> 💡 **Nota:** A solução foi desenvolvida com foco em **baixo custo/custo zero**, conforme solicitado, utilizando ferramentas **open source** e estratégias de **otimização de recursos**.
+> 💡 **Nota:** A solução foi desenvolvida com foco em **baixo custo**, utilizando ferramentas **open source** e estratégias de **otimização de recursos**.
