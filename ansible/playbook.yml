@@ -1,0 +1,358 @@
+---
+# Playbook Ansible para configuração do ambiente híbrido XPTO Finance
+# Autor: Dário Newton
+# Data: Abril 2025
+
+- name: Configuração do ambiente on-premises
+  hosts: on_premises_servers
+  become: yes
+  vars:
+    postgres_version: "14"
+    backup_retention_days: 30
+    monitoring_enabled: true
+    firewall_enabled: true
+    ha_enabled: true
+  
+  tasks:
+    - name: Atualizar pacotes
+      apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == "Debian"
+    
+    - name: Instalar pacotes essenciais
+      package:
+        name:
+          - curl
+          - wget
+          - vim
+          - htop
+          - net-tools
+          - iptables-persistent
+          - python3-pip
+          - python3-dev
+          - libpq-dev
+        state: present
+    
+    - name: Configurar timezone
+      timezone:
+        name: America/Sao_Paulo
+    
+    - name: Configurar hostname
+      hostname:
+        name: "{{ inventory_hostname }}"
+    
+    - name: Configurar limites de sistema
+      pam_limits:
+        domain: '*'
+        limit_type: "{{ item.limit_type }}"
+        limit_item: "{{ item.limit_item }}"
+        value: "{{ item.value }}"
+      loop:
+        - { limit_type: soft, limit_item: nofile, value: 65536 }
+        - { limit_type: hard, limit_item: nofile, value: 65536 }
+        - { limit_type: soft, limit_item: nproc, value: 65536 }
+        - { limit_type: hard, limit_item: nproc, value: 65536 }
+
+- name: Configuração do PostgreSQL
+  hosts: database_servers
+  become: yes
+  vars:
+    postgres_version: "14"
+    postgres_data_dir: "/var/lib/postgresql/{{ postgres_version }}/main"
+    postgres_backup_dir: "/backup/postgresql"
+    postgres_max_connections: 200
+    postgres_shared_buffers: "2GB"
+    postgres_effective_cache_size: "6GB"
+    postgres_work_mem: "64MB"
+    postgres_maintenance_work_mem: "512MB"
+    postgres_min_wal_size: "1GB"
+    postgres_max_wal_size: "4GB"
+    postgres_wal_level: "replica"
+    postgres_archive_mode: "on"
+    postgres_archive_command: "cp %p {{ postgres_backup_dir }}/archive/%f"
+    postgres_max_wal_senders: 10
+    postgres_hot_standby: "on"
+  
+  tasks:
+    - name: Adicionar repositório PostgreSQL
+      apt_repository:
+        repo: "deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main"
+        state: present
+      when: ansible_os_family == "Debian"
+    
+    - name: Instalar chave GPG do PostgreSQL
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        state: present
+      when: ansible_os_family == "Debian"
+    
+    - name: Instalar PostgreSQL
+      package:
+        name:
+          - "postgresql-{{ postgres_version }}"
+          - "postgresql-contrib-{{ postgres_version }}"
+          - "postgresql-client-{{ postgres_version }}"
+          - pgbackrest
+        state: present
+    
+    - name: Criar diretório de backup
+      file:
+        path: "{{ postgres_backup_dir }}/archive"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0750'
+    
+    - name: Configurar PostgreSQL para alta disponibilidade
+      template:
+        src: templates/postgresql.conf.j2
+        dest: "{{ postgres_data_dir }}/postgresql.conf"
+        owner: postgres
+        group: postgres
+        mode: '0644'
+      notify: restart postgresql
+    
+    - name: Configurar pg_hba.conf
+      template:
+        src: templates/pg_hba.conf.j2
+        dest: "{{ postgres_data_dir }}/pg_hba.conf"
+        owner: postgres
+        group: postgres
+        mode: '0640'
+      notify: restart postgresql
+    
+    - name: Configurar backup com pgBackRest
+      template:
+        src: templates/pgbackrest.conf.j2
+        dest: /etc/pgbackrest.conf
+        owner: postgres
+        group: postgres
+        mode: '0640'
+    
+    - name: Configurar cron para backups
+      cron:
+        name: "PostgreSQL backup"
+        hour: "1"
+        minute: "0"
+        job: "pgbackrest --stanza=main backup --type=full"
+        user: postgres
+  
+  handlers:
+    - name: restart postgresql
+      service:
+        name: "postgresql@{{ postgres_version }}-main"
+        state: restarted
+
+- name: Configuração do HAProxy
+  hosts: load_balancers
+  become: yes
+  vars:
+    haproxy_version: "2.4"
+    haproxy_stats_port: 8404
+    haproxy_stats_user: admin
+    haproxy_stats_password: "{{ vault_haproxy_stats_password }}"
+    haproxy_frontend_port: 80
+    haproxy_ssl_enabled: true
+    haproxy_ssl_cert: "/etc/ssl/private/haproxy.pem"
+  
+  tasks:
+    - name: Instalar HAProxy
+      package:
+        name: haproxy
+        state: present
+    
+    - name: Configurar HAProxy
+      template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart haproxy
+    
+    - name: Habilitar HAProxy
+      service:
+        name: haproxy
+        state: started
+        enabled: yes
+  
+  handlers:
+    - name: restart haproxy
+      service:
+        name: haproxy
+        state: restarted
+
+- name: Configuração do Monitoramento
+  hosts: monitoring_servers
+  become: yes
+  vars:
+    prometheus_version: "2.37.0"
+    grafana_version: "9.0.0"
+    node_exporter_version: "1.3.1"
+    alertmanager_version: "0.24.0"
+    prometheus_retention: "15d"
+    prometheus_storage_path: "/var/lib/prometheus"
+    grafana_admin_user: admin
+    grafana_admin_password: "{{ vault_grafana_admin_password }}"
+  
+  tasks:
+    - name: Criar usuário prometheus
+      user:
+        name: prometheus
+        system: yes
+        shell: /bin/false
+        home: "{{ prometheus_storage_path }}"
+        create_home: no
+    
+    - name: Criar diretórios para Prometheus
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+      loop:
+        - "{{ prometheus_storage_path }}"
+        - "{{ prometheus_storage_path }}/data"
+        - "/etc/prometheus"
+        - "/etc/prometheus/rules"
+        - "/etc/prometheus/file_sd"
+    
+    - name: Baixar e instalar Prometheus
+      unarchive:
+        src: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: /tmp
+        remote_src: yes
+        creates: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64"
+    
+    - name: Copiar binários do Prometheus
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+        remote_src: yes
+      loop:
+        - prometheus
+        - promtool
+    
+    - name: Configurar Prometheus
+      template:
+        src: templates/prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: restart prometheus
+    
+    - name: Configurar serviço Prometheus
+      template:
+        src: templates/prometheus.service.j2
+        dest: /etc/systemd/system/prometheus.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart prometheus
+    
+    - name: Instalar Grafana
+      apt_repository:
+        repo: "deb https://packages.grafana.com/oss/deb stable main"
+        state: present
+      when: ansible_os_family == "Debian"
+    
+    - name: Instalar chave GPG do Grafana
+      apt_key:
+        url: https://packages.grafana.com/gpg.key
+        state: present
+      when: ansible_os_family == "Debian"
+    
+    - name: Instalar pacote Grafana
+      package:
+        name: grafana
+        state: present
+    
+    - name: Configurar Grafana
+      template:
+        src: templates/grafana.ini.j2
+        dest: /etc/grafana/grafana.ini
+        owner: grafana
+        group: grafana
+        mode: '0640'
+      notify: restart grafana
+    
+    - name: Habilitar e iniciar serviços
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - prometheus
+        - grafana-server
+  
+  handlers:
+    - name: restart prometheus
+      service:
+        name: prometheus
+        state: restarted
+    
+    - name: restart grafana
+      service:
+        name: grafana-server
+        state: restarted
+
+- name: Configuração da VPN Site-to-Site
+  hosts: vpn_servers
+  become: yes
+  vars:
+    vpn_type: "strongswan"
+    vpn_local_subnet: "192.168.0.0/24"
+    vpn_remote_subnet: "10.0.0.0/16"
+    vpn_shared_key: "{{ vault_vpn_shared_key }}"
+  
+  tasks:
+    - name: Instalar StrongSwan
+      package:
+        name:
+          - strongswan
+          - strongswan-plugin-openssl
+          - strongswan-ikev2
+        state: present
+    
+    - name: Configurar ipsec.conf
+      template:
+        src: templates/ipsec.conf.j2
+        dest: /etc/ipsec.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart strongswan
+    
+    - name: Configurar ipsec.secrets
+      template:
+        src: templates/ipsec.secrets.j2
+        dest: /etc/ipsec.secrets
+        owner: root
+        group: root
+        mode: '0600'
+      notify: restart strongswan
+    
+    - name: Habilitar IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+    
+    - name: Habilitar e iniciar StrongSwan
+      service:
+        name: strongswan
+        state: started
+        enabled: yes
+  
+  handlers:
+    - name: restart strongswan
+      service:
+        name: strongswan
+        state: restarted
